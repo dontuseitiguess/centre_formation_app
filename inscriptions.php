@@ -1,5 +1,6 @@
 <?php
 require __DIR__.'/db.php';
+require __DIR__.'/header.php';
 function e($s){return htmlspecialchars($s,ENT_QUOTES,'UTF-8');}
 
 $action = $_GET['action'] ?? 'list';
@@ -16,18 +17,16 @@ if ($action==='add' && $_SERVER['REQUEST_METHOD']==='POST'){
   try{
     $session_id = (int)$_POST['session_id'];
     $etudiant_id = (int)$_POST['etudiant_id'];
-    // doublon ?
     $dupl=$pdo->prepare("SELECT 1 FROM inscription WHERE session_id=? AND etudiant_id=? AND statut <> 'ANNULE'");
     $dupl->execute([$session_id,$etudiant_id]);
     if($dupl->fetch()){ throw new Exception("Étudiant déjà inscrit à cette session."); }
-    // insert (le trigger capacité refusera si plein)
     $pdo->prepare("INSERT INTO inscription(session_id, etudiant_id, statut) VALUES(?, ?, 'PREINSCRIT')")
-        ->execute([$session_id,$etudiant_id]);
+        ->execute([$session_id,$etudiant_id]); // le trigger gère la capacité
     header("Location: inscriptions.php?session_id=$session_id&msg=ajoute"); exit;
   }catch(Exception $ex){ $err=$ex->getMessage(); }
 }
 
-if ($action==='cancel'){ // annuler une inscription
+if ($action==='cancel'){
   $pdo->prepare("UPDATE inscription SET statut='ANNULE' WHERE id=?")->execute([(int)$_GET['inscription_id']]);
   header("Location: inscriptions.php?session_id=".$session_id."&msg=annule"); exit;
 }
@@ -43,10 +42,12 @@ if ($session_id>0){
                      WHERE i.session_id=? ORDER BY etudiant");
   $st->execute([$session_id]); $inscrits=$st->fetchAll();
 
-  $st=$pdo->prepare("SELECT places_disponibles, inscrits, capacite FROM v_places_disponibles WHERE session_id=?");
+  $st=$pdo->prepare("SELECT s.capacite AS capacite,
+                        (SELECT COUNT(*) FROM inscription i WHERE i.session_id=s.id AND i.statut<>'ANNULE') AS inscrits,
+                        s.capacite - (SELECT COUNT(*) FROM inscription i2 WHERE i2.session_id=s.id AND i2.statut<>'ANNULE') AS places_disponibles
+                     FROM session s WHERE s.id=?");
   $st->execute([$session_id]); $places=$st->fetch();
 
-  // liste des étudiants non encore inscrits (pour la liste déroulante)
   $st=$pdo->prepare("SELECT e.id, CONCAT(e.prenom,' ',e.nom,' — ',e.email) AS label
                      FROM etudiant e
                      WHERE NOT EXISTS (SELECT 1 FROM inscription i WHERE i.session_id=? AND i.etudiant_id=e.id AND i.statut <> 'ANNULE')
@@ -54,76 +55,56 @@ if ($session_id>0){
   $st->execute([$session_id]); $etudiantsNonInscrits=$st->fetchAll();
 }
 ?>
-<!doctype html>
-<html lang="fr">
-<head>
-<meta charset="utf-8">
-<title>Inscriptions</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{font-family:system-ui;margin:32px}
-.btn{display:inline-block;padding:8px 12px;border:1px solid #ccc;border-radius:8px;text-decoration:none}
-table{border-collapse:collapse;width:100%;max-width:900px}
-th,td{border:1px solid #ddd;padding:8px}
-.notice{padding:10px;border-radius:8px;margin:10px 0}
-.ok{background:#e7f7ee;border:1px solid #bfe8cf}
-.err{background:#fde2e2;border:1px solid #f5b6b6}
-select{padding:8px;width:100%;max-width:520px}
-</style>
-</head>
-<body>
-  <h1>🧾 Inscriptions</h1>
-  <p><a class="btn" href="sessions.php">← Sessions</a></p>
+<h1>🧾 Inscriptions</h1>
+<p><a class="btn" href="sessions.php">← Sessions</a></p>
 
-  <?php if(isset($_GET['msg']) && $_GET['msg']==='ajoute'): ?><div class="notice ok">Étudiant inscrit.</div><?php endif; ?>
-  <?php if(isset($_GET['msg']) && $_GET['msg']==='annule'): ?><div class="notice ok">Inscription annulée.</div><?php endif; ?>
-  <?php if($err): ?><div class="notice err"><?= e($err) ?></div><?php endif; ?>
+<?php if(isset($_GET['msg']) && $_GET['msg']==='ajoute'): ?><div class="notice ok">Étudiant inscrit.</div><?php endif; ?>
+<?php if(isset($_GET['msg']) && $_GET['msg']==='annule'): ?><div class="notice ok">Inscription annulée.</div><?php endif; ?>
+<?php if($err): ?><div class="notice err"><?= e($err) ?></div><?php endif; ?>
 
-  <form method="get">
-    <label>Choisir une session</label>
-    <select name="session_id" onchange="this.form.submit()">
-      <option value="0">— Sélectionner —</option>
-      <?php foreach($sessions as $s): ?>
-        <option value="<?= (int)$s['id'] ?>" <?= $session_id==$s['id']?'selected':'' ?>><?= e($s['label']) ?></option>
+<form method="get">
+  <label>Choisir une session</label>
+  <select name="session_id" onchange="this.form.submit()">
+    <option value="0">— Sélectionner —</option>
+    <?php foreach($sessions as $s): ?>
+      <option value="<?= (int)$s['id'] ?>" <?= $session_id==$s['id']?'selected':'' ?>><?= e($s['label']) ?></option>
+    <?php endforeach; ?>
+  </select>
+  <noscript><button class="btn" type="submit">Voir</button></noscript>
+</form>
+
+<?php if($session_id>0 && $info): ?>
+  <h2><?= e($info['titre']) ?> — <?= e($info['date_debut']) ?> → <?= e($info['date_fin']) ?></h2>
+  <?php if($places): ?>
+    <p>Capacité : <strong><?= (int)$places['capacite'] ?></strong> — Inscrits : <strong><?= (int)$places['inscrits'] ?></strong> — Restant : <strong><?= (int)$places['places_disponibles'] ?></strong></p>
+  <?php endif; ?>
+
+  <h3>Ajouter un étudiant</h3>
+  <form method="post" action="inscriptions.php?action=add">
+    <input type="hidden" name="session_id" value="<?= (int)$session_id ?>">
+    <select name="etudiant_id" required>
+      <?php foreach($etudiantsNonInscrits as $et): ?>
+        <option value="<?= (int)$et['id'] ?>"><?= e($et['label']) ?></option>
       <?php endforeach; ?>
     </select>
-    <noscript><button class="btn" type="submit">Voir</button></noscript>
+    <button class="btn" type="submit">Inscrire</button>
   </form>
 
-  <?php if($session_id>0 && $info): ?>
-    <h2><?= e($info['titre']) ?> — <?= e($info['date_debut']) ?> → <?= e($info['date_fin']) ?></h2>
-    <?php if($places): ?>
-      <p>Capacité : <strong><?= (int)$places['capacite'] ?></strong> — Inscrits : <strong><?= (int)$places['inscrits'] ?></strong> — Restant : <strong><?= (int)$places['places_disponibles'] ?></strong></p>
-    <?php endif; ?>
+  <h3>Étudiants inscrits</h3>
+  <table>
+    <tr><th>Étudiant</th><th>Statut</th><th>Actions</th></tr>
+    <?php foreach($inscrits as $i): ?>
+      <tr>
+        <td><?= e($i['etudiant']) ?></td>
+        <td><?= e($i['statut']) ?></td>
+        <td>
+          <?php if($i['statut']!=='ANNULE'): ?>
+            <a class="btn" href="inscriptions.php?action=cancel&session_id=<?= (int)$session_id ?>&inscription_id=<?= (int)$i['id'] ?>" onclick="return confirm('Annuler cette inscription ?');">Annuler</a>
+          <?php else: ?> — <?php endif; ?>
+        </td>
+      </tr>
+    <?php endforeach; ?>
+  </table>
+<?php endif; ?>
 
-    <h3>Ajouter un étudiant</h3>
-    <form method="post" action="inscriptions.php?action=add">
-      <input type="hidden" name="session_id" value="<?= (int)$session_id ?>">
-      <select name="etudiant_id" required>
-        <?php foreach($etudiantsNonInscrits as $et): ?>
-          <option value="<?= (int)$et['id'] ?>"><?= e($et['label']) ?></option>
-        <?php endforeach; ?>
-      </select>
-      <button class="btn" type="submit">Inscrire</button>
-    </form>
-
-    <h3>Étudiants inscrits</h3>
-    <table>
-      <tr><th>Étudiant</th><th>Statut</th><th>Actions</th></tr>
-      <?php foreach($inscrits as $i): ?>
-        <tr>
-          <td><?= e($i['etudiant']) ?></td>
-          <td><?= e($i['statut']) ?></td>
-          <td>
-            <?php if($i['statut']!=='ANNULE'): ?>
-              <a class="btn" href="inscriptions.php?action=cancel&session_id=<?= (int)$session_id ?>&inscription_id=<?= (int)$i['id'] ?>" onclick="return confirm('Annuler cette inscription ?');">Annuler</a>
-            <?php else: ?>
-              —
-            <?php endif; ?>
-          </td>
-        </tr>
-      <?php endforeach; ?>
-    </table>
-  <?php endif; ?>
-</body>
-</html>
+<?php require __DIR__.'/footer.php'; ?>
